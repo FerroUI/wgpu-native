@@ -2840,7 +2840,12 @@ pub unsafe extern "C" fn wgpuInstanceCreateSurface(
         CreateSurfaceParams::Raw((rdh, rwh)) => {
             match context.instance_create_surface(Some(rdh), rwh, None) {
                 Ok(surface_id) => surface_id,
-                Err(cause) => handle_error_fatal(cause, "wgpuInstanceCreateSurface"),
+                // A window that cannot have a surface is not an error of the process: the
+                // standard lets this call return null, and the host draws without it.
+                Err(cause) => {
+                    log::error!("wgpuInstanceCreateSurface: {}", format_error(&cause));
+                    return std::ptr::null();
+                }
             }
         }
         #[cfg(all(any(target_os = "ios", target_os = "macos"), feature = "metal"))]
@@ -4115,7 +4120,12 @@ pub unsafe extern "C" fn wgpuSurfaceConfigure(
     ));
 
     match context.surface_configure(surface.id, device.id, &surface_config) {
-        Some(cause) => handle_error_fatal(cause, "wgpuSurfaceConfigure"),
+        // The window may be gone or between two sizes. The surface is then not configured, which
+        // the next wgpuSurfaceGetCurrentTexture reports with its status.
+        Some(cause) => {
+            log::error!("wgpuSurfaceConfigure: {}", format_error(&cause));
+            let _ = surface.data.lock().take();
+        }
         None => {
             let mut surface_data_guard = surface.data.lock();
             *surface_data_guard = Some(SurfaceData {
@@ -4233,10 +4243,11 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
     let surface_data_guard = surface.data.lock();
     let surface_data = match surface_data_guard.as_ref() {
         Some(surface_data) => surface_data,
-        None => handle_error_fatal(
-            wgc::present::SurfaceError::NotConfigured,
-            "wgpuSurfaceGetCurrentTexture",
-        ),
+        None => {
+            surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
+            surface_texture.texture = std::ptr::null();
+            return;
+        }
     };
 
     match context.surface_get_current_texture(surface.id, None) {
@@ -4272,7 +4283,11 @@ pub unsafe extern "C" fn wgpuSurfaceGetCurrentTexture(
                 None => std::ptr::null_mut(),
             };
         }
-        Err(cause) => handle_error_fatal(cause, "wgpuSurfaceGetCurrentTexture"),
+        Err(cause) => {
+            log::error!("wgpuSurfaceGetCurrentTexture: {}", format_error(&cause));
+            surface_texture.status = native::WGPUSurfaceGetCurrentTextureStatus_Error;
+            surface_texture.texture = std::ptr::null();
+        }
     };
 }
 
